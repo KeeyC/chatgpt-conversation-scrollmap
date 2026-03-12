@@ -1,3 +1,68 @@
+const CHATGPT_BRIDGE_SOURCE = 'chatgpt-scrollmap-bridge';
+const TURN_TIME_STORAGE_PREFIX = 'chatgptTimelineTurnTimes:';
+
+function extractConversationIdFromPathname(pathname = location.pathname) {
+    try {
+        const segs = String(pathname || '').split('/').filter(Boolean);
+        const i = segs.indexOf('c');
+        if (i === -1) return null;
+        const slug = segs[i + 1];
+        if (slug && /^[A-Za-z0-9_-]+$/.test(slug)) return slug;
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+function getTurnTimeStorageKey(conversationId) {
+    const cid = String(conversationId || '').trim();
+    return cid ? `${TURN_TIME_STORAGE_PREFIX}${cid}` : null;
+}
+
+function readStoredTurnTimes(conversationId) {
+    const key = getTurnTimeStorageKey(conversationId);
+    if (!key) return {};
+    try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function mergeStoredTurnTimes(conversationId, incomingTurnTimes) {
+    const key = getTurnTimeStorageKey(conversationId);
+    if (!key || !incomingTurnTimes || typeof incomingTurnTimes !== 'object') return {};
+    const current = readStoredTurnTimes(conversationId);
+    let changed = false;
+    for (const [turnId, rawValue] of Object.entries(incomingTurnTimes)) {
+        const id = String(turnId || '').trim();
+        const value = String(rawValue || '').trim();
+        if (!id || !value) continue;
+        if (current[id] !== value) {
+            current[id] = value;
+            changed = true;
+        }
+    }
+    if (changed) {
+        try { localStorage.setItem(key, JSON.stringify(current)); } catch {}
+    }
+    return current;
+}
+
+function injectChatGPTBridge() {
+    try {
+        if (document.getElementById('chatgpt-scrollmap-bridge')) return;
+        const script = document.createElement('script');
+        script.id = 'chatgpt-scrollmap-bridge';
+        script.src = chrome.runtime.getURL('page-bridge-chatgpt.js');
+        script.async = false;
+        (document.head || document.documentElement).appendChild(script);
+    } catch {}
+}
+
 class TimelineManager {
     constructor() {
         this.scrollContainer = null;
@@ -85,6 +150,7 @@ class TimelineManager {
         this.suppressClickUntil = 0;
         // Cross-tab sync
         this.onStorage = null;
+        this.turnTimes = new Map();
     }
 
     perfStart(name) {
@@ -105,14 +171,15 @@ class TimelineManager {
     async init() {
         const elementsFound = await this.findCriticalElements();
         if (!elementsFound) return;
-        
+
+        this.conversationId = this.extractConversationIdFromPath(location.pathname);
+        this.loadTurnTimes();
         this.injectTimelineUI();
         this.setupEventListeners();
         this.setupObservers();
         // Force an immediate first build so dots appear without waiting for mutations
         try { this.recalculateAndRenderMarkers(); } catch {}
         // Load persisted star markers for current conversation
-        this.conversationId = this.extractConversationIdFromPath(location.pathname);
         this.loadStars();
         // After loading stars, sync current markers/dots to reflect star state immediately
         try {
@@ -270,10 +337,14 @@ class TimelineManager {
             const absTop = el.getBoundingClientRect().top - containerRect.top + scrollTop;
             let n = absTop / totalSpan;
             n = Math.max(0, Math.min(1, n));
+            const summary = this.normalizeText(el.textContent || '');
+            const timeLabel = this.extractTurnTimeLabel(el);
             const m = {
                 id: el.dataset.turnId,
                 element: el,
-                summary: this.normalizeText(el.textContent || ''),
+                summary,
+                timeLabel,
+                label: this.composeMarkerLabel(summary, timeLabel),
                 n,
                 baseN: n,
                 dotElement: null,
@@ -294,6 +365,35 @@ class TimelineManager {
         this.updateActiveDotUI();
         this.scheduleScrollSync();
         this.perfEnd('recalc');
+
+        // Schedule a deferred re-check: if any markers still have no time label,
+        // DOM might not have rendered <time> elements yet. Retry once after a short delay.
+        const markersWithoutTime = this.markers.filter(m => !m.timeLabel);
+        if (markersWithoutTime.length > 0) {
+            if (this._retryTimeTimer) { try { clearTimeout(this._retryTimeTimer); } catch {} }
+            this._retryTimeTimer = setTimeout(() => {
+                this._retryTimeTimer = null;
+                let anyUpdated = false;
+                for (const m of this.markers) {
+                    if (m.timeLabel) continue;
+                    const newLabel = this.extractTurnTimeLabel(m.element);
+                    if (newLabel) {
+                        m.timeLabel = newLabel;
+                        m.label = this.composeMarkerLabel(m.summary, newLabel);
+                        if (m.dotElement) {
+                            try { m.dotElement.setAttribute('aria-label', m.label); } catch {}
+                        }
+                        anyUpdated = true;
+                    }
+                }
+                if (anyUpdated) {
+                    this.tooltipWidthCache.clear();
+                    if (this.currentTooltipDot) {
+                        try { this.refreshTooltipForDot(this.currentTooltipDot); } catch {}
+                    }
+                }
+            }, 1500);
+        }
     }
 
     enableAutoActiveByUserInteraction() {
@@ -741,9 +841,143 @@ class TimelineManager {
         }
     }
 
+    formatTurnDate(date) {
+        try {
+            const d = (date instanceof Date) ? date : new Date(date);
+            if (Number.isNaN(d.getTime())) return '';
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            const h = String(d.getHours()).padStart(2, '0');
+            const min = String(d.getMinutes()).padStart(2, '0');
+            return `${y}-${m}-${day} ${h}:${min}`;
+        } catch {
+            return '';
+        }
+    }
+
+    extractTurnTimeLabel(turnEl) {
+        try {
+            if (!turnEl) return '';
+            const turnId = String(turnEl.getAttribute('data-turn-id') || '').trim();
+            if (turnId && this.turnTimes.has(turnId)) {
+                return this.formatTurnDate(this.turnTimes.get(turnId));
+            }
+            const directTimestampAttrs = [
+                'data-turn-timestamp',
+                'data-timestamp',
+                'data-create-time',
+                'data-created-at',
+                'data-message-time'
+            ];
+            for (const attr of directTimestampAttrs) {
+                const raw = String(turnEl.getAttribute(attr) || '').trim();
+                if (!raw) continue;
+                const formatted = this.formatTurnDate(new Date(raw));
+                if (formatted) return formatted;
+            }
+
+            const timeWithDatetime = turnEl.querySelector('time[datetime]');
+            if (timeWithDatetime) {
+                const raw = String(timeWithDatetime.getAttribute('datetime') || '').trim();
+                if (raw) {
+                    const f = this.formatTurnDate(new Date(raw));
+                    if (f) return f;
+                }
+            }
+
+            const timeEl = turnEl.querySelector('time');
+            if (timeEl) {
+                const text = String(timeEl.textContent || '').replace(/\s+/g, ' ').trim();
+                if (text) {
+                    const parsed = new Date(text);
+                    const f = this.formatTurnDate(parsed);
+                    if (f) return f;
+                    const m = text.match(/\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|am|pm)?/);
+                    if (m) return m[0].replace(/\s+/g, '');
+                }
+            }
+
+            // Scan sibling or nearby assistant article for a <time> element (ChatGPT renders
+            // timestamps on the assistant turn that follows this user turn).
+            try {
+                const nextArticle = turnEl.nextElementSibling;
+                if (nextArticle && nextArticle.tagName === 'ARTICLE') {
+                    const sibTime = nextArticle.querySelector('time[datetime]');
+                    if (sibTime) {
+                        const raw = String(sibTime.getAttribute('datetime') || '').trim();
+                        if (raw) {
+                            const f = this.formatTurnDate(new Date(raw));
+                            if (f) return f;
+                        }
+                    }
+                    const sibTimeAny = nextArticle.querySelector('time');
+                    if (sibTimeAny) {
+                        const text = String(sibTimeAny.textContent || '').replace(/\s+/g, ' ').trim();
+                        if (text) {
+                            const parsed = new Date(text);
+                            const f = this.formatTurnDate(parsed);
+                            if (f) return f;
+                            const m = text.match(/\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|am|pm)?/);
+                            if (m) return m[0].replace(/\s+/g, '');
+                        }
+                    }
+                }
+            } catch {}
+
+            return '';
+        } catch {
+            return '';
+        }
+    }
+
+    composeMarkerLabel(summary, timeLabel) {
+        const s = String(summary || '').trim();
+        const t = String(timeLabel || '').trim();
+        if (t && s) return `${t}\n${s}`;
+        return s || t || '';
+    }
+
     getTrackPadding() {
         if (!this.ui.timelineBar) return 12;
         return this.getCSSVarNumber(this.ui.timelineBar, '--timeline-track-padding', 12);
+    }
+
+    loadTurnTimes() {
+        this.turnTimes.clear();
+        const cid = this.conversationId;
+        if (!cid) return;
+        const stored = readStoredTurnTimes(cid);
+        for (const [turnId, iso] of Object.entries(stored)) {
+            const id = String(turnId || '').trim();
+            const value = String(iso || '').trim();
+            if (id && value) this.turnTimes.set(id, value);
+        }
+    }
+
+    handleIncomingTurnTimes(conversationId, incomingTurnTimes) {
+        const cid = String(conversationId || '').trim();
+        const activeCid = String(this.conversationId || '').trim();
+        if (!cid || !activeCid || cid !== activeCid) return;
+        if (!incomingTurnTimes || typeof incomingTurnTimes !== 'object') return;
+
+        let changed = false;
+        for (const [turnId, rawValue] of Object.entries(incomingTurnTimes)) {
+            const id = String(turnId || '').trim();
+            const value = String(rawValue || '').trim();
+            if (!id || !value) continue;
+            if (this.turnTimes.get(id) !== value) {
+                this.turnTimes.set(id, value);
+                changed = true;
+            }
+        }
+
+        if (!changed) return;
+        this.tooltipWidthCache.clear();
+        this.recalculateAndRenderMarkers();
+        try {
+            if (this.currentTooltipDot) this.refreshTooltipForDot(this.currentTooltipDot);
+        } catch {}
     }
 
     getMinGap() {
@@ -818,8 +1052,9 @@ class TimelineManager {
         } catch {}
         const p = this.computePlacementInfo(dot, fullText);
         const layout = this.truncateToThreeLines(fullText, p.width, true);
-        tip.textContent = layout.text;
-        this.placeTooltipAt(dot, p.placement, p.width, layout.height);
+        this.renderTooltipContent(layout.text);
+        const measured = this.measureTooltipBox(p.width);
+        this.placeTooltipAt(dot, p.placement, measured.width, measured.height);
         tip.setAttribute('aria-hidden', 'false');
         // T1: next frame add visible for non-geometric animation only
         if (this.showRafId !== null) {
@@ -861,13 +1096,11 @@ class TimelineManager {
         if (placement === 'left') {
             left = Math.round(dotRect.left - gap - width);
             if (left < viewportPad) {
-                // Clamp within viewport: switch to right if impossible
                 const altLeft = Math.round(dotRect.right + gap);
                 if (altLeft + width <= vw - viewportPad) {
                     placement = 'right';
                     left = altLeft;
                 } else {
-                    // shrink width to fit
                     const fitWidth = Math.max(72, vw - viewportPad - altLeft);
                     left = altLeft;
                     width = fitWidth;
@@ -889,8 +1122,10 @@ class TimelineManager {
 
         let top = Math.round(dotRect.top + dotRect.height / 2 - height / 2);
         top = Math.max(viewportPad, Math.min(vh - height - viewportPad, top));
-        tip.style.width = `${Math.floor(width)}px`;
-        tip.style.height = `${Math.floor(height)}px`;
+        tip.style.width = `${Math.ceil(width)}px`;
+        // Use auto height so content is never clipped; min-height provides layout stability
+        tip.style.height = 'auto';
+        tip.style.minHeight = `${Math.ceil(height)}px`;
         tip.style.left = `${left}px`;
         tip.style.top = `${top}px`;
         tip.setAttribute('data-placement', placement);
@@ -911,8 +1146,54 @@ class TimelineManager {
         } catch {}
         const p = this.computePlacementInfo(dot, fullText);
         const layout = this.truncateToThreeLines(fullText, p.width, true);
-        tip.textContent = layout.text;
-        this.placeTooltipAt(dot, p.placement, p.width, layout.height);
+        this.renderTooltipContent(layout.text);
+        const measured = this.measureTooltipBox(p.width);
+        this.placeTooltipAt(dot, p.placement, measured.width, measured.height);
+    }
+
+    renderTooltipContent(text) {
+        if (!this.ui.tooltip) return;
+        const tip = this.ui.tooltip;
+        const { timeText, summaryText } = this.parseTooltipText(text);
+
+        tip.textContent = '';
+
+        if (timeText) {
+            const timeEl = document.createElement('div');
+            timeEl.className = 'timeline-tooltip-time';
+            timeEl.textContent = timeText;
+            tip.appendChild(timeEl);
+        }
+
+        const summaryEl = document.createElement('div');
+        summaryEl.className = 'timeline-tooltip-summary';
+        summaryEl.textContent = summaryText;
+        tip.appendChild(summaryEl);
+    }
+
+    parseTooltipText(text) {
+        const lines = String(text || '')
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean);
+        const hasTimeLine = lines.length > 1;
+        return {
+            timeText: hasTimeLine ? lines[0] : '',
+            summaryText: hasTimeLine ? lines.slice(1).join(' ') : (lines[0] || '')
+        };
+    }
+
+    measureTooltipBox(width) {
+        if (!this.ui.tooltip) return { width, height: 0 };
+        const tip = this.ui.tooltip;
+        const safeWidth = Math.max(72, Math.round(width || 0));
+        tip.style.width = `${safeWidth}px`;
+        tip.style.height = 'auto';
+        const rect = tip.getBoundingClientRect();
+        return {
+            width: Math.ceil(rect.width || safeWidth),
+            height: Math.ceil(rect.height || 0)
+        };
     }
 
     // --- Long-canvas geometry and virtualization (Linked mode) ---
@@ -1034,7 +1315,7 @@ class TimelineManager {
                 const dot = document.createElement('button');
                 dot.className = 'timeline-dot';
                 dot.dataset.targetTurnId = marker.id;
-                dot.setAttribute('aria-label', marker.summary);
+                dot.setAttribute('aria-label', marker.label || marker.summary || '');
                 dot.setAttribute('tabindex', '0');
                 try { dot.setAttribute('aria-describedby', 'chatgpt-timeline-tooltip'); } catch {}
                 try { dot.style.setProperty('--n', String(marker.n || 0)); } catch {}
@@ -1055,6 +1336,7 @@ class TimelineManager {
                 if (this.usePixelTop) {
                     marker.dotElement.style.top = `${Math.round(this.yPositions[i])}px`;
                 }
+                try { marker.dotElement.setAttribute('aria-label', marker.label || marker.summary || ''); } catch {}
                 try {
                     marker.dotElement.classList.toggle('starred', !!marker.starred);
                     marker.dotElement.setAttribute('aria-pressed', marker.starred ? 'true' : 'false');
@@ -1178,8 +1460,8 @@ class TimelineManager {
         const gap = baseGap + Math.max(0, arrowOut) + Math.max(0, boxGap);
         const viewportPad = 8;
         const maxW = this.getCSSVarNumber(tip, '--timeline-tooltip-max', 288);
-        const minW = 88;
-        const hardMinW = 72;
+        const minW = 160;
+        const hardMinW = 120;
         const leftAvail = Math.max(0, dotRect.left - gap - viewportPad);
         const rightAvail = Math.max(0, vw - dotRect.right - gap - viewportPad);
 
@@ -1204,11 +1486,27 @@ class TimelineManager {
 
     estimateTooltipWidth(text, tip, minW, maxW) {
         try {
-            const raw = String(text || '').replace(/\s+/g, ' ').trim() || ' ';
+            const normalizedLines = String(text || '')
+                .split('\n')
+                .map(line => line.replace(/\s+/g, ' ').trim())
+                .filter(Boolean);
+            const raw = normalizedLines.join('\n') || ' ';
             const cacheKey = `${Math.floor(minW)}|${Math.floor(maxW)}|${raw}`;
             if (this.tooltipWidthCache && this.tooltipWidthCache.has(cacheKey)) {
                 return this.tooltipWidthCache.get(cacheKey);
             }
+
+            const domMeasured = this.measureTooltipNaturalWidth(raw, tip, minW, maxW);
+            if (Number.isFinite(domMeasured) && domMeasured > 0) {
+                if (this.tooltipWidthCache) {
+                    try {
+                        this.tooltipWidthCache.set(cacheKey, domMeasured);
+                        if (this.tooltipWidthCache.size > 600) this.tooltipWidthCache.clear();
+                    } catch {}
+                }
+                return domMeasured;
+            }
+
             if (!this.measureCanvas) this.measureCanvas = document.createElement('canvas');
             if (!this.measureCtx) this.measureCtx = this.measureCanvas.getContext('2d');
             if (!this.measureCtx) return minW;
@@ -1216,7 +1514,10 @@ class TimelineManager {
             const cs = getComputedStyle(tip);
             const font = (cs.font && cs.font.trim()) ? cs.font : `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
             this.measureCtx.font = font;
-            const textWidth = this.measureCtx.measureText(raw).width;
+            const textWidth = Math.max(
+                ...normalizedLines.map(line => this.measureCtx.measureText(line || ' ').width),
+                this.measureCtx.measureText(' ').width
+            );
             const padX = this.getCSSVarNumber(tip, '--timeline-tooltip-pad-x', 12);
             const borderW = this.getCSSVarNumber(tip, '--timeline-tooltip-border-w', 1);
             const width = Math.ceil(textWidth + 2 * padX + 2 * borderW + 2);
@@ -1233,17 +1534,78 @@ class TimelineManager {
         }
     }
 
+    measureTooltipNaturalWidth(text, tip, minW, maxW) {
+        try {
+            if (!this.measureEl || !tip) return null;
+            const { timeText, summaryText } = this.parseTooltipText(text);
+            const cs = getComputedStyle(tip);
+            const m = this.measureEl;
+            m.textContent = '';
+            // Use block display + max-content width + nowrap for reliable width measurement
+            Object.assign(m.style, {
+                backgroundColor: cs.backgroundColor,
+                color: cs.color,
+                fontFamily: cs.fontFamily,
+                fontSize: cs.fontSize,
+                lineHeight: cs.lineHeight,
+                padding: cs.padding,
+                border: cs.border,
+                borderRadius: cs.borderRadius,
+                boxSizing: cs.boxSizing,
+                width: 'max-content',
+                minWidth: '0',
+                maxWidth: `${maxW}px`,
+                height: 'auto',
+                display: 'block',
+                whiteSpace: 'nowrap',
+                wordBreak: 'normal',
+                overflow: 'visible'
+            });
+
+            if (timeText) {
+                const timeEl = document.createElement('div');
+                timeEl.textContent = timeText;
+                Object.assign(timeEl.style, {
+                    fontFamily: cs.fontFamily,
+                    fontSize: '11px',
+                    lineHeight: '14px',
+                    whiteSpace: 'nowrap',
+                    display: 'block'
+                });
+                m.appendChild(timeEl);
+            }
+
+            const summaryEl = document.createElement('div');
+            summaryEl.textContent = summaryText || ' ';
+            Object.assign(summaryEl.style, {
+                fontFamily: cs.fontFamily,
+                fontSize: cs.fontSize,
+                lineHeight: cs.lineHeight,
+                whiteSpace: 'nowrap',
+                display: 'block'
+            });
+            m.appendChild(summaryEl);
+
+            const rect = m.getBoundingClientRect();
+            const width = Math.ceil(rect.width || 0);
+            if (!width || width < 2) return null;
+            return Math.max(minW, Math.min(width, maxW));
+        } catch {
+            return null;
+        }
+    }
+
     truncateToThreeLines(text, targetWidth, wantLayout = false) {
         try {
             if (!this.ui.tooltip) return wantLayout ? { text, height: 0 } : text;
             const tip = this.ui.tooltip;
-            const lineH = this.getCSSVarNumber(tip, '--timeline-tooltip-lh', 18);
-            const padY = this.getCSSVarNumber(tip, '--timeline-tooltip-pad-y', 10);
-            const borderW = this.getCSSVarNumber(tip, '--timeline-tooltip-border-w', 1);
-            const oneLineH = Math.round(lineH + 2 * padY + 2 * borderW);
-            const raw = String(text || '').replace(/\s+/g, ' ').trim();
+            const raw = String(text || '')
+                .split('\n')
+                .map(line => line.replace(/\s+/g, ' ').trim())
+                .filter(Boolean)
+                .join('\n');
             const out = raw;
-            return wantLayout ? { text: out, height: oneLineH } : out;
+            return wantLayout ? { text: out, height: 0 } : out;
         } catch {
             return wantLayout ? { text, height: 0 } : text;
         }
@@ -1322,6 +1684,7 @@ class TimelineManager {
     }
 
     destroy() {
+        try { if (this._retryTimeTimer) { clearTimeout(this._retryTimeTimer); this._retryTimeTimer = null; } } catch {}
         try { this.mutationObserver?.disconnect(); } catch {}
         try { this.resizeObserver?.disconnect(); } catch {}
         try { this.intersectionObserver?.disconnect(); } catch {}
@@ -1431,14 +1794,7 @@ class TimelineManager {
 
     // --- Star/Highlight helpers ---
     extractConversationIdFromPath(pathname = location.pathname) {
-        try {
-            const segs = String(pathname || '').split('/').filter(Boolean);
-            const i = segs.indexOf('c');
-            if (i === -1) return null;
-            const slug = segs[i + 1];
-            if (slug && /^[A-Za-z0-9_-]+$/.test(slug)) return slug;
-            return null;
-        } catch { return null; }
+        return extractConversationIdFromPathname(pathname);
     }
 
     loadStars() {
@@ -1497,6 +1853,7 @@ let routeCheckIntervalId = null;   // lightweight href polling fallback
 let routeListenersAttached = false;
 let timelineActive = true;         // global on/off
 let providerEnabled = true;        // per-provider on/off (chatgpt)
+let bridgeListenersAttached = false;
 
 // Accept both /c/<id> and nested routes like /g/.../c/<id>
 function isConversationRoute(pathname = location.pathname) {
@@ -1533,6 +1890,30 @@ function detachRouteListeners() {
 function cleanupGlobalObservers() {
     try { pageObserver?.disconnect(); } catch {}
     pageObserver = null;
+}
+
+function handleBridgeWindowMessage(event) {
+    try {
+        if (event.source !== window) return;
+        const data = event.data;
+        if (!data || data.source !== CHATGPT_BRIDGE_SOURCE) return;
+
+        const conversationId = String(data.conversationId || extractConversationIdFromPathname(location.pathname) || '').trim();
+        const turnTimes = (data.turnTimes && typeof data.turnTimes === 'object') ? data.turnTimes : null;
+        if (!conversationId || !turnTimes) return;
+
+        mergeStoredTurnTimes(conversationId, turnTimes);
+        if (timelineManagerInstance) {
+            timelineManagerInstance.handleIncomingTurnTimes(conversationId, turnTimes);
+        }
+    } catch {}
+}
+
+function attachBridgeListenersOnce() {
+    if (bridgeListenersAttached) return;
+    bridgeListenersAttached = true;
+    injectChatGPTBridge();
+    try { window.addEventListener('message', handleBridgeWindowMessage); } catch {}
 }
 
 function initializeTimeline() {
@@ -1584,6 +1965,7 @@ const initialObserver = new MutationObserver(() => {
     }
 });
 try { initialObserver.observe(document.body, { childList: true, subtree: true }); } catch {}
+attachBridgeListenersOnce();
 
 // Read initial toggles (new keys only) and react to changes
 try {

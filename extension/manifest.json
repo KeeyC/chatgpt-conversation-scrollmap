@@ -22,8 +22,25 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
+      "js": ["inject-bridge-chatgpt.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
       "js": ["content-chatgpt.js"],
       "css": ["styles-chatgpt.css"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-bridge-chatgpt.js"],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ]
     }
   ]
 }
