@@ -410,11 +410,10 @@
         const r = el.getBoundingClientRect();
         return (r.top - cRect.top) + st;
       });
-      const firstY = yPositions[0];
-      const lastY = (yPositions.length > 1) ? yPositions[yPositions.length - 1] : (firstY + 1);
-      const span = Math.max(1, lastY - firstY);
-      this.firstOffset = firstY;
-      this.spanPx = span;
+      const totalSpan = Math.max(1, this.scrollContainer.scrollHeight);
+      // Use full scrollable height so dots reflect true page-proportional positions
+      this.firstOffset = 0;
+      this.spanPx = totalSpan;
 
       // Build ids with priority: data-turn-id > data-um-id > legacy (text-hash + ordinal)
       const seen = new Map();
@@ -422,7 +421,7 @@
       this.markers = list.map((el) => {
         const r = el.getBoundingClientRect();
         const y = (r.top - cRect.top) + st;
-        const n = Math.max(0, Math.min(1, (y - firstY) / span));
+        const n = Math.max(0, Math.min(1, y / totalSpan));
 
         // Candidates
         const turnId = el?.dataset?.turnId || null;

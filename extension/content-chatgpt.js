@@ -246,25 +246,19 @@ class TimelineManager {
         // Clear old dots from track/content (now that we know content exists)
         (this.ui.trackContent || this.ui.timelineBar).querySelectorAll('.timeline-dot').forEach(n => n.remove());
 
-        let contentSpan;
-        const firstTurnOffset = userTurnElements[0].offsetTop;
-        if (userTurnElements.length < 2) {
-            contentSpan = 1;
-        } else {
-            const lastTurnOffset = userTurnElements[userTurnElements.length - 1].offsetTop;
-            contentSpan = lastTurnOffset - firstTurnOffset;
-        }
-        if (contentSpan <= 0) contentSpan = 1;
+        const totalSpan = Math.max(1, this.scrollContainer.scrollHeight);
+        const containerRect = this.scrollContainer.getBoundingClientRect();
+        const scrollTop = this.scrollContainer.scrollTop;
 
-        // Cache for scroll mapping
-        this.firstUserTurnOffset = firstTurnOffset;
-        this.contentSpanPx = contentSpan;
+        // Cache for scroll mapping — now relative to full scrollable height
+        this.firstUserTurnOffset = 0;
+        this.contentSpanPx = totalSpan;
 
         // Build markers with normalized position along conversation
         this.markerMap.clear();
         this.markers = Array.from(userTurnElements).map(el => {
-            const offsetFromStart = el.offsetTop - firstTurnOffset;
-            let n = offsetFromStart / contentSpan;
+            const absTop = el.getBoundingClientRect().top - containerRect.top + scrollTop;
+            let n = absTop / totalSpan;
             n = Math.max(0, Math.min(1, n));
             const m = {
                 id: el.dataset.turnId,

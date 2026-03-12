@@ -600,17 +600,16 @@
         const r = el.getBoundingClientRect();
         return (r.top - cRect.top) + st;
       });
-      const firstY = ys[0];
-      const lastY = (ys.length > 1) ? ys[ys.length - 1] : (firstY + 1);
-      const span = Math.max(1, lastY - firstY);
-      this.firstOffset = firstY;
-      this.spanPx = span;
+      const totalSpan = Math.max(1, this.scrollContainer.scrollHeight);
+      // Use full scrollable height so dots reflect true page-proportional positions
+      this.firstOffset = 0;
+      this.spanPx = totalSpan;
 
       const seen = new Map();
       try { this.markerIndexByEl?.clear(); } catch {}
       this.markers = nodes.map((el, i) => {
         const y = ys[i];
-        const n0 = this.clamp01((y - firstY) / span);
+        const n0 = this.clamp01(y / totalSpan);
         let id = null;
         try { id = el.getAttribute('data-turn-id') || null; } catch {}
         if (!id) {

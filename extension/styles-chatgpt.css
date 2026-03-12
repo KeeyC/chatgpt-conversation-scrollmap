@@ -6,7 +6,7 @@
 /* Use CSS variables for easy theme management. We sample ChatGPT's own colors. */
 :root {
     --timeline-dot-color: #D1D5DB; /* Light mode gray */
-    --timeline-dot-active-color: #10A37F; /* ChatGPT's primary green */
+    --timeline-dot-active-color: #3B82F6; /* active marker blue */
     --timeline-star-color: #F59E0B; /* amber-500 for starred */
 
     /* AI Studio-like tooltip tokens (light) */
@@ -26,8 +26,8 @@
     --timeline-tooltip-anim-out: 100ms linear;
 
     --timeline-bar-bg: rgba(240, 240, 240, 0.8);
-    --timeline-dot-size: 12px;
-    --timeline-active-ring: 3px;
+    --timeline-dot-size: 8px;
+    --timeline-active-ring: 2px;
     --timeline-track-padding: 16px;
     --timeline-tooltip-max: 288px;
     --timeline-min-gap: 24px;
@@ -42,7 +42,7 @@
 /* Override variables when ChatGPT's dark mode is active */
 html.dark, body.dark, html[data-theme="dark"], [data-theme="dark"], [data-color-mode="dark"] {
     --timeline-dot-color: #555555;
-    --timeline-dot-active-color: #19C37D;
+    --timeline-dot-active-color: #60A5FA;
     --timeline-star-color: #F59E0B;
     /* Dark tooltip palette */
     --timeline-tooltip-bg: #2B2B2B;
@@ -54,22 +54,23 @@ html.dark, body.dark, html[data-theme="dark"], [data-theme="dark"], [data-color-
 .chatgpt-timeline-bar {
     position: fixed;
     top: 60px; /* Position below the main header */
-    right: 15px;
-    width: 24px;
+    right: calc(env(safe-area-inset-right, 0px) + 1px);
+    width: 12px;
     height: calc(100vh - 100px); /* Avoid overlapping the bottom input area */
     z-index: 2147483646; /* ensure above site chrome */
     display: flex;
     flex-direction: column;
     align-items: center;
-    border-radius: 10px;
-    background-color: var(--timeline-bar-bg);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
-    transition: background-color 0.3s ease;
+    border-radius: 0;
+    background-color: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    transition: opacity 0.2s ease;
     overflow: visible;
     /* Isolate layout/paint to reduce reflow propagation during updates */
     contain: layout paint;
     touch-action: pan-y; /* allow vertical gestures only */
+    pointer-events: none; /* keep native scrollbar drag path unobstructed */
 }
 
 /* Scrollable track to host all dots (long canvas) */
@@ -79,6 +80,7 @@ html.dark, body.dark, html[data-theme="dark"], [data-theme="dark"], [data-color-
     height: 100%;
     overflow-y: auto; /* programmatic scroll in Linked mode */
     overflow-x: hidden; /* prevent horizontal wobble */
+    pointer-events: none;
 }
 
 /* Inner content whose height reflects conversation length */
@@ -87,6 +89,7 @@ html.dark, body.dark, html[data-theme="dark"], [data-theme="dark"], [data-color-
     width: 100%;
     height: 100%; /* updated by JS when needed */
     overflow-x: hidden;
+    pointer-events: none;
 }
 
 .timeline-dot {
@@ -107,6 +110,7 @@ html.dark, body.dark, html[data-theme="dark"], [data-theme="dark"], [data-color-
     -webkit-user-drag: none;
     user-select: none;
     touch-action: manipulation; /* allow tap; prevent pan-x on dot */
+    pointer-events: auto; /* dots stay interactive in overlay mode */
 }
 
 .timeline-dot::after {
@@ -143,7 +147,8 @@ html.dark, body.dark, html[data-theme="dark"], [data-theme="dark"], [data-color-
 }
 /* Style for the currently active dot */
 .timeline-dot.active::after {
-    box-shadow: 0 0 0 var(--timeline-active-ring) var(--timeline-dot-active-color), 0 0 6px var(--timeline-dot-active-color);
+    background-color: var(--timeline-dot-active-color);
+    box-shadow: none;
 }
 
 /* Starred state: filled with star color */
@@ -305,6 +310,7 @@ html.dark .timeline-slider::before { background: rgba(255,255,255,0.10); }
     top: 0; /* updated by JS */
     width: 12px; /* hit area; visual line narrower */
     height: 160px; /* updated by JS */
+    display: none !important; /* overlay mode: use native scrollbar only */
     opacity: 0;
     transition: opacity 180ms ease;
     z-index: 2147483646; /* align with bar */

@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT Conversation Timeline",
+  "name": "ChatGPT Conversation Scrollmap",
   "version": "3.1.0",
-  "description": "Adds a navigation timeline to your ChatGPT, DeepSeek, and Gemini conversations for easy navigation.",
+  "description": "Adds a navigation scrollmap to your ChatGPT conversations for easy navigation.",
   "action": {
     "default_popup": "popup.html",
-    "default_title": "会话时间轴"
+    "default_title": "会话滚动地图"
   },
   "permissions": [
     "storage"
@@ -24,20 +24,6 @@
       ],
       "js": ["content-chatgpt.js"],
       "css": ["styles-chatgpt.css"]
-    },
-    {
-      "matches": [
-        "https://chat.deepseek.com/*"
-      ],
-      "js": ["content-deepseek.js"],
-      "css": ["styles-deepseek.css"]
-    },
-    {
-      "matches": [
-        "https://gemini.google.com/*"
-      ],
-      "js": ["content-gemini.js"],
-      "css": ["styles-gemini.css"]
     }
   ]
 }
