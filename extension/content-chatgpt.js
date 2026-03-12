@@ -1419,6 +1419,33 @@ let routeCheckIntervalId = null;   // lightweight href polling fallback
 let routeListenersAttached = false;
 let timelineActive = true;         // global on/off
 let providerEnabled = true;        // per-provider on/off (chatgpt)
+let compressMenuObserver = null;   // "+" menu custom action observer
+let compressMenuInjectRaf = null;  // coalesce mutation bursts
+
+const COMPRESS_ASSISTANT_PROMPT = `你现在要担任“会话压缩助手”。
+
+任务：读取本窗口已有全部上文，生成可供新窗口接力的高信息密度压缩文档。
+
+要求：
+1. 基于本窗口完整上文，不要让我再粘贴历史。
+2. 保留：已确认结论、关键推导、术语与技术点、易混淆点、未解决问题、下一步高价值方向。
+3. 代码/命令/配置/架构/参数/公式/实现思路优先提炼。
+4. 不要编造；不确定内容请标注“待验证”。
+5. 目标是“上下文继承”，不是泛泛回顾。
+
+严格按结构输出：
+# 1. 核心背景
+# 2. 关键结论
+# 3. 重要细节
+# 4. 未解决问题
+# 5. 压缩继承版 Prompt（可直接给新窗口 AI）
+
+额外硬性限制：
+- 使用中文
+- 技术信息优先
+- 结构清晰，不要套话
+- 如果有多子主题，按主题分组
+- 最终总字数不超过500字（含全部章节）`;
 
 // Accept both /c/<id> and nested routes like /g/.../c/<id>
 function isConversationRoute(pathname = location.pathname) {
@@ -1455,6 +1482,128 @@ function detachRouteListeners() {
 function cleanupGlobalObservers() {
     try { pageObserver?.disconnect(); } catch {}
     pageObserver = null;
+}
+
+function normalizeTextLite(s) {
+    return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function isLikelyPlusMenuLabel(text) {
+    const t = normalizeTextLite(text);
+    if (!t) return false;
+    return (
+        t.includes('添加照片和文件') ||
+        t.includes('创建图片') ||
+        t.includes('深度研究') ||
+        t.includes('网页搜索') ||
+        t.includes('更多') ||
+        t.includes('add photos and files') ||
+        t.includes('create image') ||
+        t.includes('deep research') ||
+        t.includes('search the web') ||
+        t === 'more'
+    );
+}
+
+function findPlusMenuContainer() {
+    const buttons = Array.from(document.querySelectorAll('button'));
+    for (let i = 0; i < buttons.length; i++) {
+        const b = buttons[i];
+        if (!b || !b.isConnected) continue;
+        const text = (b.innerText || b.textContent || '').trim();
+        if (!isLikelyPlusMenuLabel(text)) continue;
+        const menu = b.closest('[role="menu"], [data-slot="menu-content"], [data-radix-menu-content], [data-radix-popper-content-wrapper]');
+        if (menu) return menu;
+        // Fallback: nearest compact container with multiple buttons (menu-like popover)
+        let p = b.parentElement;
+        while (p && p !== document.body) {
+            const count = p.querySelectorAll('button').length;
+            if (count >= 3 && count <= 20) return p;
+            p = p.parentElement;
+        }
+    }
+    return null;
+}
+
+function setButtonLabel(btn, label) {
+    if (!btn) return;
+    const candidates = Array.from(btn.querySelectorAll('span, div, p'));
+    for (let i = 0; i < candidates.length; i++) {
+        const el = candidates[i];
+        const t = (el.textContent || '').trim();
+        if (!t) continue;
+        el.textContent = label;
+        return;
+    }
+    btn.textContent = label;
+}
+
+function setComposerPromptText(text) {
+    const prompt = String(text || '');
+    const textarea = document.querySelector('textarea#prompt-textarea, textarea[data-testid*="prompt"], textarea');
+    if (textarea) {
+        try { textarea.focus(); } catch {}
+        textarea.value = prompt;
+        try { textarea.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+        return true;
+    }
+    const editable = document.querySelector('[contenteditable="true"][role="textbox"], [contenteditable="true"][data-testid*="composer"], [contenteditable="true"].ProseMirror');
+    if (editable) {
+        try { editable.focus(); } catch {}
+        try {
+            const sel = window.getSelection();
+            if (sel) {
+                sel.removeAllRanges();
+                const range = document.createRange();
+                range.selectNodeContents(editable);
+                sel.addRange(range);
+            }
+            document.execCommand('insertText', false, prompt);
+        } catch {
+            try { editable.textContent = prompt; } catch {}
+        }
+        try { editable.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+        return true;
+    }
+    return false;
+}
+
+function injectCompressMenuAction() {
+    const menu = findPlusMenuContainer();
+    if (!menu) return;
+    if (menu.querySelector('[data-cgtl-action="compress-assistant"]')) return;
+    const sample = menu.querySelector('button');
+    if (!sample) return;
+
+    const action = sample.cloneNode(true);
+    try { action.setAttribute('data-cgtl-action', 'compress-assistant'); } catch {}
+    try { action.removeAttribute('id'); } catch {}
+    try { action.setAttribute('aria-label', '会话压缩助手'); } catch {}
+    setButtonLabel(action, '会话压缩助手');
+    action.addEventListener('click', (e) => {
+        try { e.preventDefault(); e.stopPropagation(); } catch {}
+        try { setComposerPromptText(COMPRESS_ASSISTANT_PROMPT); } catch {}
+    }, { capture: true });
+
+    // Append as the last menu item to avoid disturbing existing order.
+    try { menu.appendChild(action); } catch {}
+}
+
+function scheduleInjectCompressMenuAction() {
+    if (compressMenuInjectRaf !== null) return;
+    compressMenuInjectRaf = requestAnimationFrame(() => {
+        compressMenuInjectRaf = null;
+        try { injectCompressMenuAction(); } catch {}
+    });
+}
+
+function ensureCompressMenuObserver() {
+    if (compressMenuObserver || !document.body) return;
+    compressMenuObserver = new MutationObserver(() => {
+        scheduleInjectCompressMenuAction();
+    });
+    try { compressMenuObserver.observe(document.body, { childList: true, subtree: true }); } catch {}
+    scheduleInjectCompressMenuAction();
 }
 
 function initializeTimeline() {
@@ -1558,3 +1707,6 @@ try {
     });
   }
 } catch {}
+
+// "+" menu custom quick prompt: conversation compression assistant
+try { ensureCompressMenuObserver(); } catch {}
