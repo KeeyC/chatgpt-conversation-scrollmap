@@ -4,7 +4,7 @@
 
 # 🗺️ ChatGPT 对话滚动地图插件
 
-> English version available in [here](./README.md)
+> English version available in [here](./README.en.md)
 
 为你的 AI 对话添加一个交互式的滚动地图。**仅支持 ChatGPT。**
 

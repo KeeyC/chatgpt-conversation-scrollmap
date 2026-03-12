@@ -520,7 +520,7 @@ class TimelineManager {
                         const id = activeDot.dataset.targetTurnId;
                         if (id && this.starred.has(id)) fullText = `★ ${fullText}`;
                     } catch {}
-                    const p = this.computePlacementInfo(activeDot);
+                    const p = this.computePlacementInfo(activeDot, fullText);
                     const layout = this.truncateToThreeLines(fullText, p.width, true);
                     tip.textContent = layout.text;
                     this.placeTooltipAt(activeDot, p.placement, p.width, layout.height);
@@ -754,7 +754,7 @@ class TimelineManager {
                 fullText = `★ ${fullText}`;
             }
         } catch {}
-        const p = this.computePlacementInfo(dot);
+        const p = this.computePlacementInfo(dot, fullText);
         const layout = this.truncateToThreeLines(fullText, p.width, true);
         tip.textContent = layout.text;
         this.placeTooltipAt(dot, p.placement, p.width, layout.height);
@@ -805,7 +805,7 @@ class TimelineManager {
                     left = altLeft;
                 } else {
                     // shrink width to fit
-                    const fitWidth = Math.max(120, vw - viewportPad - altLeft);
+                    const fitWidth = Math.max(72, vw - viewportPad - altLeft);
                     left = altLeft;
                     width = fitWidth;
                 }
@@ -818,7 +818,7 @@ class TimelineManager {
                     placement = 'left';
                     left = altLeft;
                 } else {
-                    const fitWidth = Math.max(120, vw - viewportPad - left);
+                    const fitWidth = Math.max(72, vw - viewportPad - left);
                     width = fitWidth;
                 }
             }
@@ -846,7 +846,7 @@ class TimelineManager {
             const id = dot.dataset.targetTurnId;
             if (id && this.starred.has(id)) fullText = `★ ${fullText}`;
         } catch {}
-        const p = this.computePlacementInfo(dot);
+        const p = this.computePlacementInfo(dot, fullText);
         const layout = this.truncateToThreeLines(fullText, p.width, true);
         tip.textContent = layout.text;
         this.placeTooltipAt(dot, p.placement, p.width, layout.height);
@@ -1105,7 +1105,7 @@ class TimelineManager {
         this.hideSliderDeferred();
     }
 
-    computePlacementInfo(dot) {
+    computePlacementInfo(dot, fullText = '') {
         const tip = this.ui.tooltip || document.body;
         const dotRect = dot.getBoundingClientRect();
         const vw = window.innerWidth;
@@ -1115,63 +1115,81 @@ class TimelineManager {
         const gap = baseGap + Math.max(0, arrowOut) + Math.max(0, boxGap);
         const viewportPad = 8;
         const maxW = this.getCSSVarNumber(tip, '--timeline-tooltip-max', 288);
-        const minW = 160;
+        const minW = 88;
+        const hardMinW = 72;
         const leftAvail = Math.max(0, dotRect.left - gap - viewportPad);
         const rightAvail = Math.max(0, vw - dotRect.right - gap - viewportPad);
+
+        const desired = this.estimateTooltipWidth(fullText, tip, minW, maxW);
         let placement = (rightAvail > leftAvail) ? 'right' : 'left';
         let avail = placement === 'right' ? rightAvail : leftAvail;
-        // choose width tier for determinism
-        const tiers = [280, 240, 200, 160];
-        const hardMax = Math.max(minW, Math.min(maxW, Math.floor(avail)));
-        let width = tiers.find(t => t <= hardMax) || Math.max(minW, Math.min(hardMax, 160));
-        // if no tier fits (very tight), try switching side
-        if (width < minW && placement === 'left' && rightAvail > leftAvail) {
-            placement = 'right';
-            avail = rightAvail;
-            const hardMax2 = Math.max(minW, Math.min(maxW, Math.floor(avail)));
-            width = tiers.find(t => t <= hardMax2) || Math.max(120, Math.min(hardMax2, minW));
-        } else if (width < minW && placement === 'right' && leftAvail >= rightAvail) {
-            placement = 'left';
-            avail = leftAvail;
-            const hardMax2 = Math.max(minW, Math.min(maxW, Math.floor(avail)));
-            width = tiers.find(t => t <= hardMax2) || Math.max(120, Math.min(hardMax2, minW));
+
+        // Prefer the side that can better accommodate the desired width.
+        const currentCap = Math.max(hardMinW, Math.min(maxW, Math.floor(avail)));
+        const altPlacement = placement === 'right' ? 'left' : 'right';
+        const altAvail = altPlacement === 'right' ? rightAvail : leftAvail;
+        const altCap = Math.max(hardMinW, Math.min(maxW, Math.floor(altAvail)));
+        if (Math.abs(altCap - desired) < Math.abs(currentCap - desired)) {
+            placement = altPlacement;
+            avail = altAvail;
         }
-        width = Math.max(120, Math.min(width, maxW));
+
+        const cap = Math.max(hardMinW, Math.min(maxW, Math.floor(avail)));
+        const width = Math.max(hardMinW, Math.min(desired, cap));
         return { placement, width };
+    }
+
+    estimateTooltipWidth(text, tip, minW, maxW) {
+        try {
+            const raw = String(text || '').replace(/\s+/g, ' ').trim() || ' ';
+            if (!this.measureCanvas) this.measureCanvas = document.createElement('canvas');
+            if (!this.measureCtx) this.measureCtx = this.measureCanvas.getContext('2d');
+            if (!this.measureCtx) return minW;
+
+            const cs = getComputedStyle(tip);
+            const font = (cs.font && cs.font.trim()) ? cs.font : `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+            this.measureCtx.font = font;
+            const textWidth = this.measureCtx.measureText(raw).width;
+            const padX = this.getCSSVarNumber(tip, '--timeline-tooltip-pad-x', 12);
+            const borderW = this.getCSSVarNumber(tip, '--timeline-tooltip-border-w', 1);
+            const width = Math.ceil(textWidth + 2 * padX + 2 * borderW + 2);
+            return Math.max(minW, Math.min(width, maxW));
+        } catch {
+            return minW;
+        }
     }
 
     truncateToThreeLines(text, targetWidth, wantLayout = false) {
         try {
-            if (!this.measureEl || !this.ui.tooltip) return wantLayout ? { text, height: 0 } : text;
+            if (!this.ui.tooltip) return wantLayout ? { text, height: 0 } : text;
             const tip = this.ui.tooltip;
             const lineH = this.getCSSVarNumber(tip, '--timeline-tooltip-lh', 18);
             const padY = this.getCSSVarNumber(tip, '--timeline-tooltip-pad-y', 10);
+            const padX = this.getCSSVarNumber(tip, '--timeline-tooltip-pad-x', 12);
             const borderW = this.getCSSVarNumber(tip, '--timeline-tooltip-border-w', 1);
-            const maxH = Math.round(3 * lineH + 2 * padY + 2 * borderW);
-            const ell = '…';
-            const el = this.measureEl;
-            el.style.width = `${Math.max(0, Math.floor(targetWidth))}px`;
+            const oneLineH = Math.round(lineH + 2 * padY + 2 * borderW);
+            const ell = '...';
+            const raw = String(text || '').replace(/\s+/g, ' ').trim();
+            const contentW = Math.max(1, Math.floor(targetWidth - 2 * padX - 2 * borderW));
 
-            // fast path: full text fits within 3 lines
-            el.textContent = String(text || '').replace(/\s+/g, ' ').trim();
-            let h = el.offsetHeight;
-            if (h <= maxH) {
-                return wantLayout ? { text: el.textContent, height: h } : el.textContent;
-            }
+            if (!this.measureCanvas) this.measureCanvas = document.createElement('canvas');
+            if (!this.measureCtx) this.measureCtx = this.measureCanvas.getContext('2d');
+            if (!this.measureCtx) return wantLayout ? { text: raw, height: oneLineH } : raw;
 
-            // binary search longest prefix that fits
-            const raw = el.textContent;
+            const cs = getComputedStyle(tip);
+            const font = (cs.font && cs.font.trim()) ? cs.font : `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+            this.measureCtx.font = font;
+            const fits = (s) => this.measureCtx.measureText(s).width <= contentW;
+            if (fits(raw)) return wantLayout ? { text: raw, height: oneLineH } : raw;
+
             let lo = 0, hi = raw.length, ans = 0;
             while (lo <= hi) {
                 const mid = (lo + hi) >> 1;
-                el.textContent = raw.slice(0, mid).trimEnd() + ell;
-                h = el.offsetHeight;
-                if (h <= maxH) { ans = mid; lo = mid + 1; } else { hi = mid - 1; }
+                const candidate = raw.slice(0, mid).trimEnd() + ell;
+                if (fits(candidate)) { ans = mid; lo = mid + 1; } else { hi = mid - 1; }
             }
-            const out = (ans >= raw.length) ? raw : (raw.slice(0, ans).trimEnd() + ell);
-            el.textContent = out;
-            h = el.offsetHeight;
-            return wantLayout ? { text: out, height: Math.min(h, maxH) } : out;
+            const out = (ans <= 0) ? ell : (raw.slice(0, ans).trimEnd() + ell);
+            return wantLayout ? { text: out, height: oneLineH } : out;
         } catch {
             return wantLayout ? { text, height: 0 } : text;
         }
