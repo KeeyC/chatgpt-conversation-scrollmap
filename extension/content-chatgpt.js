@@ -20,11 +20,17 @@ class TimelineManager {
         this.onTimelineBarFocusOut = null;
         this.onWindowResize = null;
         this.onTimelineWheel = null;
+        this.onScrollContainerWheel = null;
+        this.onScrollContainerPointerDown = null;
+        this.onScrollContainerTouchStart = null;
+        this.onDocumentKeyDown = null;
         this.scrollRafId = null;
         this.lastActiveChangeTime = 0;
         this.minActiveChangeInterval = 120; // ms
         this.pendingActiveId = null;
         this.activeChangeTimer = null;
+        // Disable auto-active on init/route switch until user actually interacts.
+        this.autoActiveEnabled = false;
         this.tooltipHideDelay = 100;
         this.tooltipHideTimer = null;
         this.measureEl = null; // legacy DOM measurer (kept as fallback)
@@ -32,6 +38,10 @@ class TimelineManager {
         this.measureCanvas = null;
         this.measureCtx = null;
         this.showRafId = null;
+        this.tooltipWidthCache = new Map();
+        this.pendingTooltipDot = null;
+        this.tooltipShowRafId = null;
+        this.currentTooltipDot = null;
         // Long-canvas scrollable track (Linked mode)
         this.ui.track = null;
         this.ui.trackContent = null;
@@ -278,15 +288,16 @@ class TimelineManager {
 
         // Compute geometry and virtualize render
         this.updateTimelineGeometry();
-        if (!this.activeTurnId && this.markers.length > 0) {
-            this.activeTurnId = this.markers[this.markers.length - 1].id;
-        }
         this.syncTimelineTrackToMain();
         this.updateVirtualRangeAndRender();
         // Ensure active class is applied after dots are created
         this.updateActiveDotUI();
         this.scheduleScrollSync();
         this.perfEnd('recalc');
+    }
+
+    enableAutoActiveByUserInteraction() {
+        this.autoActiveEnabled = true;
     }
     
     setupObservers() {
@@ -356,6 +367,15 @@ class TimelineManager {
         if (this.scrollContainer && this.onScroll) {
             try { this.scrollContainer.removeEventListener('scroll', this.onScroll); } catch {}
         }
+        if (this.scrollContainer && this.onScrollContainerWheel) {
+            try { this.scrollContainer.removeEventListener('wheel', this.onScrollContainerWheel); } catch {}
+        }
+        if (this.scrollContainer && this.onScrollContainerPointerDown) {
+            try { this.scrollContainer.removeEventListener('pointerdown', this.onScrollContainerPointerDown); } catch {}
+        }
+        if (this.scrollContainer && this.onScrollContainerTouchStart) {
+            try { this.scrollContainer.removeEventListener('touchstart', this.onScrollContainerTouchStart); } catch {}
+        }
         try { this.mutationObserver?.disconnect(); } catch {}
         try { this.intersectionObserver?.disconnect(); } catch {}
         try { this.themeObserver?.disconnect(); } catch {}
@@ -377,6 +397,12 @@ class TimelineManager {
         // Reattach scroll listener
         this.onScroll = () => this.scheduleScrollSync();
         this.scrollContainer.addEventListener('scroll', this.onScroll, { passive: true });
+        this.onScrollContainerWheel = () => this.enableAutoActiveByUserInteraction();
+        this.onScrollContainerPointerDown = () => this.enableAutoActiveByUserInteraction();
+        this.onScrollContainerTouchStart = () => this.enableAutoActiveByUserInteraction();
+        this.scrollContainer.addEventListener('wheel', this.onScrollContainerWheel, { passive: true });
+        this.scrollContainer.addEventListener('pointerdown', this.onScrollContainerPointerDown, { passive: true });
+        this.scrollContainer.addEventListener('touchstart', this.onScrollContainerTouchStart, { passive: true });
 
         // Recreate IntersectionObserver with new root
         this.intersectionObserver = new IntersectionObserver(entries => {
@@ -408,6 +434,7 @@ class TimelineManager {
         this.onTimelineBarClick = (e) => {
             const dot = e.target.closest('.timeline-dot');
             if (dot) {
+                this.enableAutoActiveByUserInteraction();
                 const now = Date.now();
                 if (now < (this.suppressClickUntil || 0)) {
                     try { e.preventDefault(); e.stopPropagation(); } catch {}
@@ -427,6 +454,7 @@ class TimelineManager {
             const dot = ev.target.closest?.('.timeline-dot');
             if (!dot) return;
             if (typeof ev.button === 'number' && ev.button !== 0) return; // left button only
+            this.enableAutoActiveByUserInteraction();
             this.cancelLongPress();
             this.pressTargetDot = dot;
             this.pressStartPos = { x: ev.clientX, y: ev.clientY };
@@ -468,11 +496,27 @@ class TimelineManager {
         // Listen to container scroll to keep marker active state in sync
         this.onScroll = () => this.scheduleScrollSync();
         this.scrollContainer.addEventListener('scroll', this.onScroll, { passive: true });
+        this.onScrollContainerWheel = () => this.enableAutoActiveByUserInteraction();
+        this.onScrollContainerPointerDown = () => this.enableAutoActiveByUserInteraction();
+        this.onScrollContainerTouchStart = () => this.enableAutoActiveByUserInteraction();
+        this.onDocumentKeyDown = (e) => {
+            if (!e) return;
+            const t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+            const k = e.key;
+            if (k === 'ArrowUp' || k === 'ArrowDown' || k === 'PageUp' || k === 'PageDown' || k === 'Home' || k === 'End' || k === ' ') {
+                this.enableAutoActiveByUserInteraction();
+            }
+        };
+        this.scrollContainer.addEventListener('wheel', this.onScrollContainerWheel, { passive: true });
+        this.scrollContainer.addEventListener('pointerdown', this.onScrollContainerPointerDown, { passive: true });
+        this.scrollContainer.addEventListener('touchstart', this.onScrollContainerTouchStart, { passive: true });
+        document.addEventListener('keydown', this.onDocumentKeyDown, { passive: true });
 
         // Tooltip interactions (delegated)
         this.onTimelineBarOver = (e) => {
             const dot = e.target.closest('.timeline-dot');
-            if (dot) this.showTooltipForDot(dot);
+            if (dot) this.scheduleShowTooltipForDot(dot);
         };
         this.onTimelineBarOut = (e) => {
             const fromDot = e.target.closest('.timeline-dot');
@@ -481,7 +525,7 @@ class TimelineManager {
         };
         this.onTimelineBarFocusIn = (e) => {
             const dot = e.target.closest('.timeline-dot');
-            if (dot) this.showTooltipForDot(dot);
+            if (dot) this.scheduleShowTooltipForDot(dot);
         };
         this.onTimelineBarFocusOut = (e) => {
             const dot = e.target.closest('.timeline-dot');
@@ -538,6 +582,7 @@ class TimelineManager {
             this.updateTimelineGeometry();
             this.syncTimelineTrackToMain();
             this.updateVirtualRangeAndRender();
+            try { this.tooltipWidthCache?.clear(); } catch {}
         };
         window.addEventListener('resize', this.onWindowResize);
         // VisualViewport resize can fire on zoom on some platforms; schedule correction
@@ -546,12 +591,14 @@ class TimelineManager {
                 this.updateTimelineGeometry();
                 this.syncTimelineTrackToMain();
                 this.updateVirtualRangeAndRender();
+                try { this.tooltipWidthCache?.clear(); } catch {}
             };
             try { window.visualViewport.addEventListener('resize', this.onVisualViewportResize); } catch {}
         }
 
         // Scroll wheel on the timeline controls the main scroll container (Linked mode)
         this.onTimelineWheel = (e) => {
+            this.enableAutoActiveByUserInteraction();
             // Prevent page from attempting to scroll anything else
             try { e.preventDefault(); } catch {}
             const delta = e.deltaY || 0;
@@ -741,11 +788,26 @@ class TimelineManager {
 
     // (Removed) Idle min-gap reapply; ChatGPT keeps min-gap solely in updateTimelineGeometry
 
+    scheduleShowTooltipForDot(dot) {
+        if (!dot) return;
+        this.pendingTooltipDot = dot;
+        if (this.tooltipShowRafId !== null) return;
+        this.tooltipShowRafId = requestAnimationFrame(() => {
+            this.tooltipShowRafId = null;
+            const nextDot = this.pendingTooltipDot;
+            this.pendingTooltipDot = null;
+            if (!nextDot) return;
+            this.showTooltipForDot(nextDot);
+        });
+    }
+
     showTooltipForDot(dot) {
         if (!this.ui.tooltip) return;
         try { if (this.tooltipHideTimer) { clearTimeout(this.tooltipHideTimer); this.tooltipHideTimer = null; } } catch {}
         // T0: compute + write geometry while hidden
         const tip = this.ui.tooltip;
+        if (this.currentTooltipDot === dot && tip.classList.contains('visible')) return;
+        this.currentTooltipDot = dot;
         tip.classList.remove('visible');
         let fullText = (dot.getAttribute('aria-label') || '').trim();
         try {
@@ -776,6 +838,7 @@ class TimelineManager {
             this.ui.tooltip.classList.remove('visible');
             this.ui.tooltip.setAttribute('aria-hidden', 'true');
             this.tooltipHideTimer = null;
+            this.currentTooltipDot = null;
         };
         if (immediate) return doHide();
         try { if (this.tooltipHideTimer) { clearTimeout(this.tooltipHideTimer); } } catch {}
@@ -1142,6 +1205,10 @@ class TimelineManager {
     estimateTooltipWidth(text, tip, minW, maxW) {
         try {
             const raw = String(text || '').replace(/\s+/g, ' ').trim() || ' ';
+            const cacheKey = `${Math.floor(minW)}|${Math.floor(maxW)}|${raw}`;
+            if (this.tooltipWidthCache && this.tooltipWidthCache.has(cacheKey)) {
+                return this.tooltipWidthCache.get(cacheKey);
+            }
             if (!this.measureCanvas) this.measureCanvas = document.createElement('canvas');
             if (!this.measureCtx) this.measureCtx = this.measureCanvas.getContext('2d');
             if (!this.measureCtx) return minW;
@@ -1153,7 +1220,14 @@ class TimelineManager {
             const padX = this.getCSSVarNumber(tip, '--timeline-tooltip-pad-x', 12);
             const borderW = this.getCSSVarNumber(tip, '--timeline-tooltip-border-w', 1);
             const width = Math.ceil(textWidth + 2 * padX + 2 * borderW + 2);
-            return Math.max(minW, Math.min(width, maxW));
+            const out = Math.max(minW, Math.min(width, maxW));
+            if (this.tooltipWidthCache) {
+                try {
+                    this.tooltipWidthCache.set(cacheKey, out);
+                    if (this.tooltipWidthCache.size > 600) this.tooltipWidthCache.clear();
+                } catch {}
+            }
+            return out;
         } catch {
             return minW;
         }
@@ -1165,30 +1239,10 @@ class TimelineManager {
             const tip = this.ui.tooltip;
             const lineH = this.getCSSVarNumber(tip, '--timeline-tooltip-lh', 18);
             const padY = this.getCSSVarNumber(tip, '--timeline-tooltip-pad-y', 10);
-            const padX = this.getCSSVarNumber(tip, '--timeline-tooltip-pad-x', 12);
             const borderW = this.getCSSVarNumber(tip, '--timeline-tooltip-border-w', 1);
             const oneLineH = Math.round(lineH + 2 * padY + 2 * borderW);
-            const ell = '...';
             const raw = String(text || '').replace(/\s+/g, ' ').trim();
-            const contentW = Math.max(1, Math.floor(targetWidth - 2 * padX - 2 * borderW));
-
-            if (!this.measureCanvas) this.measureCanvas = document.createElement('canvas');
-            if (!this.measureCtx) this.measureCtx = this.measureCanvas.getContext('2d');
-            if (!this.measureCtx) return wantLayout ? { text: raw, height: oneLineH } : raw;
-
-            const cs = getComputedStyle(tip);
-            const font = (cs.font && cs.font.trim()) ? cs.font : `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-            this.measureCtx.font = font;
-            const fits = (s) => this.measureCtx.measureText(s).width <= contentW;
-            if (fits(raw)) return wantLayout ? { text: raw, height: oneLineH } : raw;
-
-            let lo = 0, hi = raw.length, ans = 0;
-            while (lo <= hi) {
-                const mid = (lo + hi) >> 1;
-                const candidate = raw.slice(0, mid).trimEnd() + ell;
-                if (fits(candidate)) { ans = mid; lo = mid + 1; } else { hi = mid - 1; }
-            }
-            const out = (ans <= 0) ? ell : (raw.slice(0, ans).trimEnd() + ell);
+            const out = raw;
             return wantLayout ? { text: out, height: oneLineH } : out;
         } catch {
             return wantLayout ? { text, height: 0 } : text;
@@ -1209,6 +1263,7 @@ class TimelineManager {
 
     computeActiveByScroll() {
         if (!this.scrollContainer || this.markers.length === 0) return;
+        if (!this.autoActiveEnabled) return;
         const containerRect = this.scrollContainer.getBoundingClientRect();
         const scrollTop = this.scrollContainer.scrollTop;
         const ref = scrollTop + this.scrollContainer.clientHeight * 0.45;
@@ -1283,6 +1338,18 @@ class TimelineManager {
         if (this.scrollContainer && this.onScroll) {
             try { this.scrollContainer.removeEventListener('scroll', this.onScroll); } catch {}
         }
+        if (this.scrollContainer && this.onScrollContainerWheel) {
+            try { this.scrollContainer.removeEventListener('wheel', this.onScrollContainerWheel); } catch {}
+        }
+        if (this.scrollContainer && this.onScrollContainerPointerDown) {
+            try { this.scrollContainer.removeEventListener('pointerdown', this.onScrollContainerPointerDown); } catch {}
+        }
+        if (this.scrollContainer && this.onScrollContainerTouchStart) {
+            try { this.scrollContainer.removeEventListener('touchstart', this.onScrollContainerTouchStart); } catch {}
+        }
+        if (this.onDocumentKeyDown) {
+            try { document.removeEventListener('keydown', this.onDocumentKeyDown); } catch {}
+        }
         if (this.ui.timelineBar) {
             try { this.ui.timelineBar.removeEventListener('mouseover', this.onTimelineBarOver); } catch {}
             try { this.ui.timelineBar.removeEventListener('mouseout', this.onTimelineBarOut); } catch {}
@@ -1346,9 +1413,20 @@ class TimelineManager {
             try { clearTimeout(this.tooltipHideTimer); } catch {}
             this.tooltipHideTimer = null;
         }
+        if (this.tooltipShowRafId !== null) {
+            try { cancelAnimationFrame(this.tooltipShowRafId); } catch {}
+            this.tooltipShowRafId = null;
+        }
+        this.pendingTooltipDot = null;
+        this.currentTooltipDot = null;
         
         if (this.sliderFadeTimer) { try { clearTimeout(this.sliderFadeTimer); } catch {} this.sliderFadeTimer = null; }
         this.pendingActiveId = null;
+        this.autoActiveEnabled = false;
+        this.onScrollContainerWheel = null;
+        this.onScrollContainerPointerDown = null;
+        this.onScrollContainerTouchStart = null;
+        this.onDocumentKeyDown = null;
     }
 
     // --- Star/Highlight helpers ---
@@ -1419,33 +1497,6 @@ let routeCheckIntervalId = null;   // lightweight href polling fallback
 let routeListenersAttached = false;
 let timelineActive = true;         // global on/off
 let providerEnabled = true;        // per-provider on/off (chatgpt)
-let compressMenuObserver = null;   // "+" menu custom action observer
-let compressMenuInjectRaf = null;  // coalesce mutation bursts
-
-const COMPRESS_ASSISTANT_PROMPT = `你现在要担任“会话压缩助手”。
-
-任务：读取本窗口已有全部上文，生成可供新窗口接力的高信息密度压缩文档。
-
-要求：
-1. 基于本窗口完整上文，不要让我再粘贴历史。
-2. 保留：已确认结论、关键推导、术语与技术点、易混淆点、未解决问题、下一步高价值方向。
-3. 代码/命令/配置/架构/参数/公式/实现思路优先提炼。
-4. 不要编造；不确定内容请标注“待验证”。
-5. 目标是“上下文继承”，不是泛泛回顾。
-
-严格按结构输出：
-# 1. 核心背景
-# 2. 关键结论
-# 3. 重要细节
-# 4. 未解决问题
-# 5. 压缩继承版 Prompt（可直接给新窗口 AI）
-
-额外硬性限制：
-- 使用中文
-- 技术信息优先
-- 结构清晰，不要套话
-- 如果有多子主题，按主题分组
-- 最终总字数不超过500字（含全部章节）`;
 
 // Accept both /c/<id> and nested routes like /g/.../c/<id>
 function isConversationRoute(pathname = location.pathname) {
@@ -1482,128 +1533,6 @@ function detachRouteListeners() {
 function cleanupGlobalObservers() {
     try { pageObserver?.disconnect(); } catch {}
     pageObserver = null;
-}
-
-function normalizeTextLite(s) {
-    return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-}
-
-function isLikelyPlusMenuLabel(text) {
-    const t = normalizeTextLite(text);
-    if (!t) return false;
-    return (
-        t.includes('添加照片和文件') ||
-        t.includes('创建图片') ||
-        t.includes('深度研究') ||
-        t.includes('网页搜索') ||
-        t.includes('更多') ||
-        t.includes('add photos and files') ||
-        t.includes('create image') ||
-        t.includes('deep research') ||
-        t.includes('search the web') ||
-        t === 'more'
-    );
-}
-
-function findPlusMenuContainer() {
-    const buttons = Array.from(document.querySelectorAll('button'));
-    for (let i = 0; i < buttons.length; i++) {
-        const b = buttons[i];
-        if (!b || !b.isConnected) continue;
-        const text = (b.innerText || b.textContent || '').trim();
-        if (!isLikelyPlusMenuLabel(text)) continue;
-        const menu = b.closest('[role="menu"], [data-slot="menu-content"], [data-radix-menu-content], [data-radix-popper-content-wrapper]');
-        if (menu) return menu;
-        // Fallback: nearest compact container with multiple buttons (menu-like popover)
-        let p = b.parentElement;
-        while (p && p !== document.body) {
-            const count = p.querySelectorAll('button').length;
-            if (count >= 3 && count <= 20) return p;
-            p = p.parentElement;
-        }
-    }
-    return null;
-}
-
-function setButtonLabel(btn, label) {
-    if (!btn) return;
-    const candidates = Array.from(btn.querySelectorAll('span, div, p'));
-    for (let i = 0; i < candidates.length; i++) {
-        const el = candidates[i];
-        const t = (el.textContent || '').trim();
-        if (!t) continue;
-        el.textContent = label;
-        return;
-    }
-    btn.textContent = label;
-}
-
-function setComposerPromptText(text) {
-    const prompt = String(text || '');
-    const textarea = document.querySelector('textarea#prompt-textarea, textarea[data-testid*="prompt"], textarea');
-    if (textarea) {
-        try { textarea.focus(); } catch {}
-        textarea.value = prompt;
-        try { textarea.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
-        return true;
-    }
-    const editable = document.querySelector('[contenteditable="true"][role="textbox"], [contenteditable="true"][data-testid*="composer"], [contenteditable="true"].ProseMirror');
-    if (editable) {
-        try { editable.focus(); } catch {}
-        try {
-            const sel = window.getSelection();
-            if (sel) {
-                sel.removeAllRanges();
-                const range = document.createRange();
-                range.selectNodeContents(editable);
-                sel.addRange(range);
-            }
-            document.execCommand('insertText', false, prompt);
-        } catch {
-            try { editable.textContent = prompt; } catch {}
-        }
-        try { editable.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
-        return true;
-    }
-    return false;
-}
-
-function injectCompressMenuAction() {
-    const menu = findPlusMenuContainer();
-    if (!menu) return;
-    if (menu.querySelector('[data-cgtl-action="compress-assistant"]')) return;
-    const sample = menu.querySelector('button');
-    if (!sample) return;
-
-    const action = sample.cloneNode(true);
-    try { action.setAttribute('data-cgtl-action', 'compress-assistant'); } catch {}
-    try { action.removeAttribute('id'); } catch {}
-    try { action.setAttribute('aria-label', '会话压缩助手'); } catch {}
-    setButtonLabel(action, '会话压缩助手');
-    action.addEventListener('click', (e) => {
-        try { e.preventDefault(); e.stopPropagation(); } catch {}
-        try { setComposerPromptText(COMPRESS_ASSISTANT_PROMPT); } catch {}
-    }, { capture: true });
-
-    // Append as the last menu item to avoid disturbing existing order.
-    try { menu.appendChild(action); } catch {}
-}
-
-function scheduleInjectCompressMenuAction() {
-    if (compressMenuInjectRaf !== null) return;
-    compressMenuInjectRaf = requestAnimationFrame(() => {
-        compressMenuInjectRaf = null;
-        try { injectCompressMenuAction(); } catch {}
-    });
-}
-
-function ensureCompressMenuObserver() {
-    if (compressMenuObserver || !document.body) return;
-    compressMenuObserver = new MutationObserver(() => {
-        scheduleInjectCompressMenuAction();
-    });
-    try { compressMenuObserver.observe(document.body, { childList: true, subtree: true }); } catch {}
-    scheduleInjectCompressMenuAction();
 }
 
 function initializeTimeline() {
@@ -1707,6 +1636,3 @@ try {
     });
   }
 } catch {}
-
-// "+" menu custom quick prompt: conversation compression assistant
-try { ensureCompressMenuObserver(); } catch {}
