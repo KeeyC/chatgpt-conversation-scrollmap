@@ -9,12 +9,11 @@
 为你的 AI 对话添加一个交互式的滚动地图。**仅支持 ChatGPT。**
 
 ## 如何使用
-1. 推荐从 Chrome 商店安装：[前往安装](https://chromewebstore.google.com/detail/ickndngbbabdllekmflaaogkpmnloalg?utm_source=item-share-cb)
-2. 或手动安装：打开 `chrome://extensions/`，开启开发者模式，点击“加载已解压的扩展程序”，选择 `extension/` 文件夹。
-3. 打开 ChatGPT 的任意会话页面。
-4. 使用右侧滚动地图圆点快速跳转到对应用户消息。
-5. 长按圆点可标记/取消标记重点。
-6. 在弹窗中可进行全局开关和 ChatGPT 开关。
+1. 手动安装：打开 `chrome://extensions/`，开启开发者模式，点击"加载已解压的扩展程序"，选择 `extension/` 文件夹。
+2. 打开 ChatGPT 的任意会话页面。
+3. 使用右侧滚动地图圆点快速跳转到对应用户消息。
+4. 长按圆点可标记/取消标记重点。
+5. 在弹窗中可进行全局开关和 ChatGPT 开关。
 
 ## 兼容性说明
 - 当前仅在 macOS 环境下测试使用。

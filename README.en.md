@@ -9,12 +9,11 @@
 An extension that adds an interactive scrollmap to your AI chat conversations. **Supports ChatGPT only.**
 
 ## How to Use
-1. Install from Chrome Web Store: [Install](https://chromewebstore.google.com/detail/ickndngbbabdllekmflaaogkpmnloalg?utm_source=item-share-cb)
-2. Or install manually: open `chrome://extensions/`, enable Developer Mode, click `Load unpacked`, and select the `extension/` folder.
-3. Open any conversation page on ChatGPT.
-4. Use the right-side scrollmap markers to jump to a user message.
-5. Long-press a marker to star/unstar it.
-6. Use the popup to enable/disable globally and for ChatGPT.
+1. Install manually: open `chrome://extensions/`, enable Developer Mode, click `Load unpacked`, and select the `extension/` folder.
+2. Open any conversation page on ChatGPT.
+3. Use the right-side scrollmap markers to jump to a user message.
+4. Long-press a marker to star/unstar it.
+5. Use the popup to enable/disable globally and for ChatGPT.
 
 ## Compatibility Notes
 - Tested on macOS only.
