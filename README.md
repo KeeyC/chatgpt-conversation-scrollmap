@@ -34,7 +34,7 @@
 - 优化圆点悬停提示性能：将重计算合并为每帧一次，并简化 tooltip 文本测量路径，减少大量圆点时的悬停卡顿。
 
 ## 后续计划
-- 将加入飞书网页版中与 OpenClaw 对话场景的支持。
+- 后续将支持飞书和 Telegram。
 
 ## 致谢
 本 Fork 基于原开源项目：[Reborn14/chatgpt-conversation-timeline](https://github.com/Reborn14/chatgpt-conversation-timeline)。
